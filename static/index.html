@@ -1,359 +1,257 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MTG Card Analyzer</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MTG Card Analyzer</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #1a1a2e; color: #e0e0e0;
+        min-height: 100vh; display: flex; align-items: flex-start;
+        justify-content: center; padding: 24px;
+      }
+      .container { width: 100%; max-width: 960px; }
+      h1 {
+        text-align: center; font-size: 1.8rem; font-weight: 700; margin-bottom: 6px;
+        background: linear-gradient(135deg, #a78bfa, #60a5fa);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      }
+      .subtitle { text-align: center; color: #9ca3af; font-size: .9rem; margin-bottom: 24px; }
+      .tabs { display: flex; gap: 4px; margin-bottom: 0; }
+      .tab-btn {
+        padding: 10px 24px; border-radius: 8px 8px 0 0;
+        background: #0f3460; border: 1px solid #2d3748; border-bottom: none;
+        color: #9ca3af; font-size: .9rem; font-weight: 600; cursor: pointer;
+        transition: background .2s, color .2s;
+      }
+      .tab-btn.active { background: #16213e; color: #a78bfa; }
+      .card {
+        background: #16213e; border: 1px solid #2d3748;
+        border-radius: 0 12px 12px 12px; padding: 28px;
+      }
+      label {
+        display: block; font-size: .85rem; font-weight: 600;
+        color: #a78bfa; margin-bottom: 8px; letter-spacing: .04em; text-transform: uppercase;
+      }
+      .input-row { display: flex; gap: 10px; }
+      input[type="url"] {
+        flex: 1; background: #0f3460; border: 1px solid #374151;
+        border-radius: 8px; padding: 12px 16px; color: #e0e0e0;
+        font-size: .95rem; outline: none; transition: border-color .2s;
+      }
+      input[type="url"]:focus { border-color: #a78bfa; }
+      .btn {
+        background: linear-gradient(135deg, #7c3aed, #2563eb);
+        color: #fff; border: none; border-radius: 8px;
+        padding: 12px 24px; font-size: .95rem; font-weight: 600;
+        cursor: pointer; white-space: nowrap; transition: opacity .2s;
+      }
+      .btn:disabled { opacity: .5; cursor: not-allowed; }
+      .loading { display: flex; align-items: center; gap: 12px; color: #a78bfa; font-size: .95rem; margin-top: 28px; }
+      .spinner {
+        width: 22px; height: 22px;
+        border: 3px solid #374151; border-top-color: #a78bfa;
+        border-radius: 50%; animation: spin .8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .result-layout { display: flex; gap: 24px; margin-top: 28px; align-items: flex-start; }
+      .preview-area { flex: 0 0 auto; width: 220px; }
+      .preview-area img { width: 100%; border-radius: 10px; border: 2px solid #374151; display: block; }
+      .img-label { text-align: center; font-size: .75rem; color: #6b7280; margin-top: 6px; }
+      .result-area { flex: 1; }
+      .result-table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+      .result-table tr:not(:last-child) td { border-bottom: 1px solid #2d3748; }
+      .result-table td { padding: 10px 6px; vertical-align: top; }
+      .result-table td:first-child { color: #9ca3af; font-weight: 600; width: 44%; white-space: nowrap; }
+      .result-table td:last-child { color: #e0e0e0; word-break: break-all; }
+      .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .8rem; font-weight: 700; }
+      .badge-ok  { background: #065f46; color: #6ee7b7; }
+      .badge-ng  { background: #7f1d1d; color: #fca5a5; }
+      .badge-ai  { background: #1e3a5f; color: #93c5fd; }
+      a.scryfall-link { color: #60a5fa; text-decoration: none; }
+      a.scryfall-link:hover { text-decoration: underline; }
+      .error-box {
+        margin-top: 20px; background: #450a0a; border: 1px solid #7f1d1d;
+        border-radius: 8px; padding: 14px 18px; color: #fca5a5; font-size: .9rem;
+      }
+      .scrape-meta { color: #9ca3af; font-size: .85rem; margin: 16px 0 10px; }
+      .scrape-table-wrap { overflow-x: auto; margin-top: 8px; }
+      .scrape-table { width: 100%; border-collapse: collapse; font-size: .82rem; min-width: 700px; }
+      .scrape-table th {
+        background: #0f3460; color: #a78bfa; font-weight: 700;
+        padding: 8px 10px; text-align: left; border-bottom: 2px solid #374151; white-space: nowrap;
+      }
+      .scrape-table td { padding: 7px 10px; border-bottom: 1px solid #2d3748; vertical-align: middle; }
+      .scrape-table tr:hover td { background: #1c2e50; }
+      .foil-yes { color: #fcd34d; font-weight: 700; }
+      .foil-no  { color: #6b7280; }
+      .num-null { color: #6b7280; font-style: italic; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>MTG Card Analyzer</h1>
+      <p class="subtitle">画像解析・サイトスクレイプでMTGカード情報を取得します</p>
 
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #1a1a2e;
-      color: #e0e0e0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-    }
-
-    .container {
-      width: 100%;
-      max-width: 860px;
-    }
-
-    h1 {
-      text-align: center;
-      font-size: 1.8rem;
-      font-weight: 700;
-      margin-bottom: 6px;
-      background: linear-gradient(135deg, #a78bfa, #60a5fa);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-
-    .subtitle {
-      text-align: center;
-      color: #9ca3af;
-      font-size: 0.9rem;
-      margin-bottom: 32px;
-    }
-
-    .card {
-      background: #16213e;
-      border: 1px solid #2d3748;
-      border-radius: 12px;
-      padding: 28px;
-    }
-
-    label {
-      display: block;
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: #a78bfa;
-      margin-bottom: 8px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-
-    .input-row {
-      display: flex;
-      gap: 10px;
-    }
-
-    input[type="url"] {
-      flex: 1;
-      background: #0f3460;
-      border: 1px solid #374151;
-      border-radius: 8px;
-      padding: 12px 16px;
-      color: #e0e0e0;
-      font-size: 0.95rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-
-    input[type="url"]:focus {
-      border-color: #a78bfa;
-    }
-
-    button#analyzeBtn {
-      background: linear-gradient(135deg, #7c3aed, #2563eb);
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      padding: 12px 24px;
-      font-size: 0.95rem;
-      font-weight: 600;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: opacity 0.2s;
-    }
-
-    button#analyzeBtn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    /* プレビュー + 結果 の横並び */
-    .result-layout {
-      display: flex;
-      gap: 24px;
-      margin-top: 28px;
-      align-items: flex-start;
-    }
-
-    .preview-area {
-      flex: 0 0 auto;
-      width: 220px;
-    }
-
-    .preview-area img {
-      width: 100%;
-      border-radius: 10px;
-      border: 2px solid #374151;
-      display: block;
-    }
-
-    .preview-area .img-label {
-      text-align: center;
-      font-size: 0.75rem;
-      color: #6b7280;
-      margin-top: 6px;
-    }
-
-    .result-area {
-      flex: 1;
-    }
-
-    /* ローディング */
-    .loading {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      color: #a78bfa;
-      font-size: 0.95rem;
-      margin-top: 28px;
-    }
-
-    .spinner {
-      width: 22px;
-      height: 22px;
-      border: 3px solid #374151;
-      border-top-color: #a78bfa;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* 結果テーブル */
-    .result-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.92rem;
-    }
-
-    .result-table tr:not(:last-child) td {
-      border-bottom: 1px solid #2d3748;
-    }
-
-    .result-table td {
-      padding: 10px 6px;
-      vertical-align: top;
-    }
-
-    .result-table td:first-child {
-      color: #9ca3af;
-      font-weight: 600;
-      width: 44%;
-      white-space: nowrap;
-    }
-
-    .result-table td:last-child {
-      color: #e0e0e0;
-      word-break: break-all;
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 2px 10px;
-      border-radius: 999px;
-      font-size: 0.8rem;
-      font-weight: 700;
-    }
-
-    .badge-ok  { background: #065f46; color: #6ee7b7; }
-    .badge-ng  { background: #7f1d1d; color: #fca5a5; }
-
-    a.scryfall-link {
-      color: #60a5fa;
-      text-decoration: none;
-    }
-    a.scryfall-link:hover { text-decoration: underline; }
-
-    /* エラー */
-    .error-box {
-      margin-top: 20px;
-      background: #450a0a;
-      border: 1px solid #7f1d1d;
-      border-radius: 8px;
-      padding: 14px 18px;
-      color: #fca5a5;
-      font-size: 0.9rem;
-    }
-
-    .hidden { display: none !important; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>MTG Card Analyzer</h1>
-    <p class="subtitle">カード画像URLを入力すると、セットコードとコレクター番号をAIで解析します</p>
-
-    <div class="card">
-      <label for="imageUrl">画像 URL</label>
-      <div class="input-row">
-        <input
-          type="url"
-          id="imageUrl"
-          placeholder="https://example.com/card.jpg"
-          value="https://goodgame.co.jp/cdn/shop/files/1f4ebb5a-936a-45bb-9bfd-5cd0c6d2fd97.jpg?v=1776398333"
-        />
-        <button id="analyzeBtn" onclick="analyze()">解析する</button>
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('analyze', this)">画像解析</button>
+        <button class="tab-btn" onclick="switchTab('scrape', this)">サイトスクレイプ</button>
       </div>
 
-      <!-- ローディング -->
-      <div id="loading" class="loading hidden">
-        <div class="spinner"></div>
-        <span>AIが解析中です...</span>
-      </div>
+      <div class="card">
 
-      <!-- エラー -->
-      <div id="errorBox" class="error-box hidden"></div>
-
-      <!-- 結果 -->
-      <div id="resultLayout" class="result-layout hidden">
-        <!-- 左：入力画像プレビュー -->
-        <div class="preview-area">
-          <img id="inputPreview" src="" alt="入力画像" />
-          <div class="img-label">入力画像</div>
-        </div>
-
-        <!-- 右：解析結果 -->
-        <div class="result-area">
-          <table class="result-table">
-            <tr>
-              <td>セットコード</td>
-              <td id="resSetCode">—</td>
-            </tr>
-            <tr>
-              <td>コレクター番号</td>
-              <td id="resCollectorNumber">—</td>
-            </tr>
-            <tr>
-              <td>カード名</td>
-              <td id="resCardName">—</td>
-            </tr>
-            <tr>
-              <td>Scryfall 検証</td>
-              <td id="resValidated">—</td>
-            </tr>
-            <tr>
-              <td>Scryfall ページ</td>
-              <td id="resScryfallUri">—</td>
-            </tr>
-          </table>
-
-          <!-- Scryfall 正規画像 -->
-          <div id="scryfallImageWrap" class="preview-area hidden" style="width:100%;margin-top:16px;">
-            <img id="scryfallImage" src="" alt="Scryfall 画像" style="width:160px;" />
-            <div class="img-label">Scryfall 正規画像</div>
+        <!-- 画像解析タブ -->
+        <div id="tab-analyze">
+          <label for="imageUrl">画像 URL</label>
+          <div class="input-row">
+            <input type="url" id="imageUrl"
+              placeholder="https://example.com/card.jpg"
+              value="https://goodgame.co.jp/cdn/shop/files/1f4ebb5a-936a-45bb-9bfd-5cd0c6d2fd97.jpg?v=1776398333" />
+            <button class="btn" id="analyzeBtn" onclick="analyze()">解析する</button>
+          </div>
+          <div id="analyzeLoading" class="loading hidden">
+            <div class="spinner"></div><span>AIが解析中です...</span>
+          </div>
+          <div id="analyzeError" class="error-box hidden"></div>
+          <div id="resultLayout" class="result-layout hidden">
+            <div class="preview-area">
+              <img id="inputPreview" src="" alt="入力画像" />
+              <div class="img-label">入力画像</div>
+            </div>
+            <div class="result-area">
+              <table class="result-table">
+                <tr><td>セットコード</td><td id="resSetCode">—</td></tr>
+                <tr><td>コレクター番号</td><td id="resCollectorNumber">—</td></tr>
+                <tr><td>カード名</td><td id="resCardName">—</td></tr>
+                <tr><td>Scryfall 検証</td><td id="resValidated">—</td></tr>
+                <tr><td>Scryfall ページ</td><td id="resScryfallUri">—</td></tr>
+              </table>
+              <div id="scryfallImageWrap" class="preview-area hidden" style="width:100%;margin-top:16px">
+                <img id="scryfallImage" src="" alt="Scryfall画像" style="width:160px" />
+                <div class="img-label">Scryfall 正規画像</div>
+              </div>
+            </div>
           </div>
         </div>
+
+        <!-- スクレイプタブ -->
+        <div id="tab-scrape" class="hidden">
+          <label for="scrapeUrl">商品グループ URL</label>
+          <div class="input-row">
+            <input type="url" id="scrapeUrl"
+              placeholder="https://www.singlestar.jp/product-group/XXXX"
+              value="https://www.singlestar.jp/product-group/4676" />
+            <button class="btn" id="scrapeBtn" onclick="scrape()">スクレイプ</button>
+          </div>
+          <div id="scrapeLoading" class="loading hidden">
+            <div class="spinner"></div>
+            <span>スクレイプ中... (件数によっては1〜2分かかります)</span>
+          </div>
+          <div id="scrapeError" class="error-box hidden"></div>
+          <div id="scrapeResult" class="hidden">
+            <p class="scrape-meta" id="scrapeMeta"></p>
+            <div class="scrape-table-wrap">
+              <table class="scrape-table">
+                <thead>
+                  <tr>
+                    <th>#</th><th>カード名(EN)</th><th>カード名(JA)</th>
+                    <th>セット</th><th>番号</th><th>言語</th>
+                    <th>FOIL</th><th>価格</th><th>番号特定</th>
+                  </tr>
+                </thead>
+                <tbody id="scrapeTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
-  </div>
 
-  <script>
-    async function analyze() {
-      const url = document.getElementById('imageUrl').value.trim();
-      if (!url) return;
-
-      // UI リセット
-      setVisible('loading', true);
-      setVisible('errorBox', false);
-      setVisible('resultLayout', false);
-      document.getElementById('analyzeBtn').disabled = true;
-
-      try {
-        const res = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_url: url }),
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          showError(data.detail || `エラー: ${res.status}`);
-          return;
-        }
-
-        // 入力画像プレビュー
-        document.getElementById('inputPreview').src = url;
-
-        // 結果セット
-        document.getElementById('resSetCode').textContent = data.set_code ?? '—';
-        document.getElementById('resCollectorNumber').textContent = data.collector_number ?? '—';
-        document.getElementById('resCardName').textContent = data.card_name ?? '—';
-
-        const validatedEl = document.getElementById('resValidated');
-        validatedEl.innerHTML = data.validated
-          ? '<span class="badge badge-ok">検証済み</span>'
-          : '<span class="badge badge-ng">未検証</span>';
-
-        const scryfallEl = document.getElementById('resScryfallUri');
-        if (data.scryfall_uri) {
-          scryfallEl.innerHTML = `<a class="scryfall-link" href="${data.scryfall_uri}" target="_blank" rel="noopener noreferrer">Scryfallで開く</a>`;
-        } else {
-          scryfallEl.textContent = '—';
-        }
-
-        if (data.scryfall_image_uri) {
-          document.getElementById('scryfallImage').src = data.scryfall_image_uri;
-          setVisible('scryfallImageWrap', true);
-        } else {
-          setVisible('scryfallImageWrap', false);
-        }
-
-        setVisible('resultLayout', true);
-
-      } catch (e) {
-        showError(`通信エラー: ${e.message}`);
-      } finally {
-        setVisible('loading', false);
-        document.getElementById('analyzeBtn').disabled = false;
+    <script>
+      function switchTab(name, btn) {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-analyze').classList.toggle('hidden', name !== 'analyze');
+        document.getElementById('tab-scrape').classList.toggle('hidden', name !== 'scrape');
       }
-    }
 
-    function showError(msg) {
-      const box = document.getElementById('errorBox');
-      box.textContent = msg;
-      setVisible('errorBox', true);
-    }
+      async function analyze() {
+        const url = document.getElementById('imageUrl').value.trim();
+        if (!url) return;
+        setVisible('analyzeLoading', true);
+        setVisible('analyzeError', false);
+        setVisible('resultLayout', false);
+        document.getElementById('analyzeBtn').disabled = true;
+        try {
+          const res = await fetch('/api/analyze', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({image_url: url}),
+          });
+          const data = await res.json();
+          if (!res.ok) { showError('analyzeError', data.detail || `エラー: ${res.status}`); return; }
+          document.getElementById('inputPreview').src = url;
+          document.getElementById('resSetCode').textContent = data.set_code ?? '—';
+          document.getElementById('resCollectorNumber').textContent = data.collector_number ?? '—';
+          document.getElementById('resCardName').textContent = data.card_name ?? '—';
+          document.getElementById('resValidated').innerHTML = data.validated
+            ? '<span class="badge badge-ok">検証済み</span>'
+            : '<span class="badge badge-ng">未検証</span>';
+          const scryfallEl = document.getElementById('resScryfallUri');
+          scryfallEl.innerHTML = data.scryfall_uri
+            ? `<a class="scryfall-link" href="${data.scryfall_uri}" target="_blank" rel="noopener noreferrer">Scryfallで開く</a>`
+            : '—';
+          if (data.scryfall_image_uri) {
+            document.getElementById('scryfallImage').src = data.scryfall_image_uri;
+            setVisible('scryfallImageWrap', true);
+          } else setVisible('scryfallImageWrap', false);
+          setVisible('resultLayout', true);
+        } catch(e) { showError('analyzeError', `通信エラー: ${e.message}`); }
+        finally { setVisible('analyzeLoading', false); document.getElementById('analyzeBtn').disabled = false; }
+      }
 
-    function setVisible(id, visible) {
-      const el = document.getElementById(id);
-      if (visible) el.classList.remove('hidden');
-      else el.classList.add('hidden');
-    }
+      async function scrape() {
+        const url = document.getElementById('scrapeUrl').value.trim();
+        if (!url) return;
+        setVisible('scrapeLoading', true);
+        setVisible('scrapeError', false);
+        setVisible('scrapeResult', false);
+        document.getElementById('scrapeBtn').disabled = true;
+        try {
+          const res = await fetch('/api/scrape', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url}),
+          });
+          const data = await res.json();
+          if (!res.ok) { showError('scrapeError', data.detail || `エラー: ${res.status}`); return; }
+          document.getElementById('scrapeMeta').textContent = `取得件数: ${data.total} 件`;
+          const tbody = document.getElementById('scrapeTableBody');
+          tbody.innerHTML = '';
+          data.items.forEach((item, i) => {
+            const tr = document.createElement('tr');
+            const numCell = item.card_number ? esc(item.card_number) : '<span class="num-null">未特定</span>';
+            const foilCell = item.foil ? '<span class="foil-yes">FOIL</span>' : '<span class="foil-no">—</span>';
+            const aiCell = item.disambiguated_by_ai
+              ? '<span class="badge badge-ai">AI</span>'
+              : (item.card_number ? '<span class="badge badge-ok">確定</span>' : '—');
+            const price = item.price != null ? `¥${item.price.toLocaleString()}` : '—';
+            tr.innerHTML = `<td>${i+1}</td><td>${esc(item.card_name_en??'—')}</td><td>${esc(item.card_name_ja??'—')}</td><td>${esc(item.set_code??'—')}</td><td>${numCell}</td><td>${esc(item.lang??'—')}</td><td>${foilCell}</td><td>${price}</td><td>${aiCell}</td>`;
+            tbody.appendChild(tr);
+          });
+          setVisible('scrapeResult', true);
+        } catch(e) { showError('scrapeError', `通信エラー: ${e.message}`); }
+        finally { setVisible('scrapeLoading', false); document.getElementById('scrapeBtn').disabled = false; }
+      }
 
-    // Enter キーで解析
-    document.getElementById('imageUrl').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') analyze();
-    });
-  </script>
-</body>
+      function showError(id, msg) { const b = document.getElementById(id); b.textContent = msg; setVisible(id, true); }
+      function setVisible(id, v) { document.getElementById(id).classList.toggle('hidden', !v); }
+      function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+      document.getElementById('imageUrl').addEventListener('keydown', e => { if(e.key==='Enter') analyze(); });
+      document.getElementById('scrapeUrl').addEventListener('keydown', e => { if(e.key==='Enter') scrape(); });
+    </script>
+  </body>
 </html>

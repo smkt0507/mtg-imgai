@@ -213,3 +213,108 @@ async def analyze_card_image(image_url: str) -> dict:
     if provider == "gemini":
         return await _analyze_with_gemini(image_url)
     raise AIProviderError("AI_PROVIDER は 'gemini' か 'openai' を指定してください。")
+
+
+DISAMBIGUATE_PROMPT = """You are an expert Magic: The Gathering card identifier.
+
+Given a product title from a Japanese card shop and a list of Scryfall card candidates,
+choose the ONE candidate whose collector_number best matches the product.
+
+Use these clues:
+- frame_effects: e.g. "showcase", "extendedart", "borderless" — these usually mean higher collector numbers
+- border_color: "borderless" means a borderless treatment
+- full_art: true means full-art basic land or special treatment
+- promo: true means promo card
+- If the product title contains words like ショーケース, ボーダーレス, エクステンデッドアート, then prefer those frame effects
+- If no special treatment is mentioned in the title, prefer the plain/lowest collector number
+
+Respond ONLY with valid JSON:
+{"collector_number": "123"}
+
+If you truly cannot decide, return {"collector_number": null}
+"""
+
+
+async def disambiguate_card_number(raw_name: str, candidates: list[dict]) -> str | None:
+    """
+    商品名と Scryfall 候補リストから最適なコレクター番号を AI で選ぶ。
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]["collector_number"]
+
+    prompt_user = (
+        f"Product title: {raw_name}\n\n"
+        f"Candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}\n\n"
+        "Which collector_number matches this product?"
+    )
+
+    provider = settings.ai_provider.lower().strip()
+    try:
+        if provider == "openai":
+            result = await _disambiguate_openai(prompt_user)
+        else:
+            result = await _disambiguate_gemini(prompt_user)
+    except Exception:
+        # AI が失敗したら最小番号を返す（フォールバック）
+        nums = sorted(candidates, key=lambda c: c["collector_number"].zfill(10))
+        return nums[0]["collector_number"]
+
+    return result.get("collector_number")
+
+
+async def _disambiguate_openai(prompt_user: str) -> dict:
+    if not settings.openai_api_key:
+        raise AIProviderError("OPENAI_API_KEY が未設定です。")
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": DISAMBIGUATE_PROMPT},
+            {"role": "user", "content": prompt_user},
+        ],
+        max_tokens=64,
+        temperature=0,
+    )
+    return _extract_json(response.choices[0].message.content or "")
+
+
+async def _disambiguate_gemini(prompt_user: str) -> dict:
+    if not settings.gemini_api_key:
+        raise AIProviderError("GEMINI_API_KEY が未設定です。")
+
+    async with httpx.AsyncClient(timeout=30.0) as client_http:
+        model_candidates = await _discover_gemini_models(client_http)
+        if not model_candidates:
+            raise AIProviderError("Gemini の利用可能モデルが見つかりませんでした。")
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": DISAMBIGUATE_PROMPT + "\n\n" + prompt_user},
+                    ]
+                }
+            ],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 64},
+        }
+
+        for api_version, model_name in model_candidates:
+            endpoint = (
+                f"https://generativelanguage.googleapis.com/{api_version}/models/"
+                f"{model_name}:generateContent"
+            )
+            resp = await client_http.post(
+                endpoint,
+                params={"key": settings.gemini_api_key},
+                json=payload,
+            )
+            if resp.status_code in (404, 429):
+                continue
+            resp.raise_for_status()
+            parts = resp.json()["candidates"][0]["content"]["parts"]
+            text = "\n".join(p.get("text", "") for p in parts).strip()
+            return _extract_json(text)
+
+    raise AIProviderError("Gemini の呼び出しに失敗しました。")
+

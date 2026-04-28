@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.routers.analyze import router as analyze_router
+from app.routers.scrape import router as scrape_router
 
 app = FastAPI(
     title="MTG Card Analyzer",
@@ -19,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(analyze_router)
+app.include_router(scrape_router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
