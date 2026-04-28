@@ -161,7 +161,13 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
         async def _get_enriched_item(raw_item: dict) -> dict:
             key = _enrich_cache_key(raw_item)
             if not key[0] or not key[1]:
-                return await enrich_card_number(raw_item)
+                enriched = await enrich_card_number(raw_item)
+                return {
+                    **raw_item,
+                    "card_number": enriched.get("card_number"),
+                    "candidates": enriched.get("candidates", []),
+                    "scryfall_error": enriched.get("scryfall_error"),
+                }
 
             async with cache_lock:
                 task = enrich_tasks.get(key)
@@ -173,7 +179,13 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
                     task = asyncio.create_task(_run_enrich())
                     enrich_tasks[key] = task
 
-            return await task
+            enriched = await task
+            return {
+                **raw_item,
+                "card_number": enriched.get("card_number"),
+                "candidates": enriched.get("candidates", []),
+                "scryfall_error": enriched.get("scryfall_error"),
+            }
 
         async def _get_card_number(item: dict, candidates: list[dict]) -> tuple[str | None, bool]:
             key = _disambiguation_cache_key(item, candidates)

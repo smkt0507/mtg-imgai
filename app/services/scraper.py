@@ -22,6 +22,19 @@ def _extract_number_hint(text: str | None) -> Optional[str]:
     return match.group(1)
 
 
+def _extract_product_code_number_hint(text: str | None) -> Optional[str]:
+    if not text:
+        return None
+
+    matches = re.findall(r"\[\s*(\d{6,})\s*\]", text)
+    if not matches:
+        return None
+
+    product_code = matches[-1]
+    hint = product_code[-3:].lstrip("0")
+    return hint or "0"
+
+
 def _normalize_search_name(text: str | None) -> Optional[str]:
     if not text:
         return None
@@ -50,7 +63,7 @@ def _extract_variant_signature(text: str) -> str:
     return "|".join(sorted(set(variants))) or "plain"
 
 
-def _parse_goods_name(raw: str) -> dict:
+def _parse_goods_name(raw: str, full_text: str | None = None) -> dict:
     """
     商品名テキストをパースして各フィールドを返す。
 
@@ -61,7 +74,8 @@ def _parse_goods_name(raw: str) -> dict:
     raw = raw.strip()
 
     # foil
-    foil = raw.startswith("[FOIL]")
+    source_text = full_text or raw
+    foil = raw.startswith("[FOIL]") or "FOIL" in source_text.upper()
     text = raw.removeprefix("[FOIL]").strip()
 
     # lang
@@ -78,7 +92,7 @@ def _parse_goods_name(raw: str) -> dict:
 
     # カード名: "/" より後が英語名、前が日本語名
     # 【...】 や [...]  以降を除去
-    name_part = re.split(r"【|〔|\[", text)[0].strip()
+    name_part = re.split(r"〖|【|〔|\[", text)[0].strip()
 
     if "/" in name_part:
         card_name_ja, card_name_en = name_part.split("/", 1)
@@ -89,7 +103,11 @@ def _parse_goods_name(raw: str) -> dict:
         card_name_en = name_part.strip() or None
 
     search_name_en = _normalize_search_name(card_name_en)
-    number_hint = _extract_number_hint(card_name_en) or _extract_number_hint(raw)
+    number_hint = (
+        _extract_number_hint(card_name_en)
+        or _extract_number_hint(raw)
+        or _extract_product_code_number_hint(source_text)
+    )
 
     return {
         "raw_name": raw,
@@ -185,8 +203,9 @@ def _parse_items(soup: BeautifulSoup) -> list[dict]:
         if not name_el:
             continue
 
-        raw_name = name_el.get_text(strip=True)
-        parsed = _parse_goods_name(raw_name)
+        raw_name = name_el.get_text(" ", strip=True)
+        full_text = item_el.get_text(" ", strip=True)
+        parsed = _parse_goods_name(raw_name, full_text=full_text)
         parsed["price"] = _parse_price(price_el.get_text()) if price_el else None
         parsed["card_number"] = None  # Scryfall で後から補完
         items.append(parsed)
