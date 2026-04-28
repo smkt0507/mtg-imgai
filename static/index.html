@@ -221,6 +221,31 @@
         font-size: 0.85rem;
         margin: 16px 0 10px;
       }
+      .progress-wrap {
+        margin-top: 12px;
+        width: 100%;
+      }
+      .progress-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        color: #cbd5e1;
+        font-size: 0.82rem;
+        margin-bottom: 6px;
+      }
+      .progress-track {
+        width: 100%;
+        height: 10px;
+        border-radius: 999px;
+        background: #263349;
+        overflow: hidden;
+      }
+      .progress-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #60a5fa, #a78bfa);
+        transition: width 0.25s ease;
+      }
       .scrape-table-wrap {
         overflow-x: auto;
         margin-top: 8px;
@@ -363,6 +388,15 @@
             <div class="spinner"></div>
             <span>スクレイプ中... (件数によっては1〜2分かかります)</span>
           </div>
+          <div id="scrapeProgressWrap" class="progress-wrap hidden">
+            <div class="progress-head">
+              <span id="scrapeProgressText">進捗を準備中...</span>
+              <span id="scrapeProgressPct">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="scrapeProgressBar" class="progress-bar"></div>
+            </div>
+          </div>
           <div id="scrapeError" class="error-box hidden"></div>
           <div id="scrapeResult" class="hidden">
             <p class="scrape-meta" id="scrapeMeta"></p>
@@ -460,27 +494,92 @@
         const url = document.getElementById("scrapeUrl").value.trim();
         if (!url) return;
         setVisible("scrapeLoading", true);
+        setVisible("scrapeProgressWrap", true);
         setVisible("scrapeError", false);
         setVisible("scrapeResult", false);
+        updateScrapeProgress({
+          stage: "queued",
+          processed: 0,
+          total: 0,
+          elapsed_seconds: 0,
+        });
         document.getElementById("scrapeBtn").disabled = true;
         try {
-          const res = await fetch("/api/scrape", {
+          const startRes = await fetch("/api/scrape/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url }),
           });
-          if (!res.ok) {
-            let msg = `エラー: ${res.status}`;
+          if (!startRes.ok) {
+            let msg = `エラー: ${startRes.status}`;
             try {
-              const e = await res.json();
+              const e = await startRes.json();
               msg = e.detail || msg;
             } catch {
-              msg = await res.text().catch(() => msg);
+              msg = await startRes.text().catch(() => msg);
             }
             showError("scrapeError", msg);
             return;
           }
-          const data = await res.json();
+
+          const started = await startRes.json();
+          const jobId = started.job_id;
+          if (!jobId) {
+            showError("scrapeError", "ジョブIDを取得できませんでした。");
+            return;
+          }
+
+          let data = null;
+          for (;;) {
+            const stRes = await fetch(`/api/scrape/status/${jobId}`);
+            if (!stRes.ok) {
+              let msg = `進捗取得エラー: ${stRes.status}`;
+              try {
+                const e = await stRes.json();
+                msg = e.detail || msg;
+              } catch {
+                msg = await stRes.text().catch(() => msg);
+              }
+              showError("scrapeError", msg);
+              return;
+            }
+
+            const status = await stRes.json();
+            updateScrapeProgress(status);
+
+            if (status.state === "failed") {
+              showError(
+                "scrapeError",
+                status.error || "スクレイプに失敗しました。",
+              );
+              return;
+            }
+
+            if (status.state === "completed") {
+              const resultRes = await fetch(`/api/scrape/result/${jobId}`);
+              if (!resultRes.ok) {
+                let msg = `結果取得エラー: ${resultRes.status}`;
+                try {
+                  const e = await resultRes.json();
+                  msg = e.detail || msg;
+                } catch {
+                  msg = await resultRes.text().catch(() => msg);
+                }
+                showError("scrapeError", msg);
+                return;
+              }
+              data = await resultRes.json();
+              break;
+            }
+
+            await delay(1000);
+          }
+
+          if (!data) {
+            showError("scrapeError", "結果を取得できませんでした。");
+            return;
+          }
+
           document.getElementById("scrapeMeta").textContent =
             `取得件数: ${data.total} 件`;
           const tbody = document.getElementById("scrapeTableBody");
@@ -508,8 +607,34 @@
           showError("scrapeError", `通信エラー: ${e.message}`);
         } finally {
           setVisible("scrapeLoading", false);
+          setVisible("scrapeProgressWrap", false);
           document.getElementById("scrapeBtn").disabled = false;
         }
+      }
+
+      function updateScrapeProgress(status) {
+        const stageMap = {
+          queued: "待機中",
+          running: "処理中",
+          scryfall: "Scryfall照合",
+          ai: "AI番号特定",
+          done: "完了",
+        };
+        const stage = stageMap[status.stage] || status.stage || "処理中";
+        const processed = Number(status.processed || 0);
+        const total = Number(status.total || 0);
+        const pct =
+          total > 0 ? Math.min(100, Math.floor((processed / total) * 100)) : 0;
+        const elapsed = Number(status.elapsed_seconds || 0);
+
+        document.getElementById("scrapeProgressText").textContent =
+          `${stage}: ${processed}/${total || "?"}件 (${elapsed}s)`;
+        document.getElementById("scrapeProgressPct").textContent = `${pct}%`;
+        document.getElementById("scrapeProgressBar").style.width = `${pct}%`;
+      }
+
+      function delay(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
       }
 
       function showError(id, msg) {

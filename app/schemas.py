@@ -49,3 +49,17 @@ class CardItem(BaseModel):
 class ScrapeResponse(BaseModel):
     total: int = Field(..., description="取得件数")
     items: list[CardItem]
+
+
+class ScrapeStartResponse(BaseModel):
+    job_id: str = Field(..., description="進捗確認に使うジョブID")
+
+
+class ScrapeStatusResponse(BaseModel):
+    job_id: str = Field(..., description="ジョブID")
+    state: str = Field(..., description="queued/running/completed/failed")
+    stage: str = Field(..., description="現在の処理段階")
+    processed: int = Field(..., description="処理済み件数")
+    total: int = Field(..., description="全体件数")
+    elapsed_seconds: int = Field(..., description="経過秒数")
+    error: Optional[str] = Field(None, description="失敗時のエラーメッセージ")
