@@ -1,5 +1,7 @@
+import base64
 import json
 import re
+import httpx
 from openai import AsyncOpenAI
 
 from app.config import settings
@@ -31,10 +33,14 @@ If you cannot determine a value, use null for that field.
 """
 
 
-async def analyze_card_image(image_url: str) -> dict:
-    """
-    GPT-4o Vision を使用して MTG カード画像からセットコードとコレクター番号を抽出する。
-    """
+def _extract_json(raw: str) -> dict:
+    json_match = re.search(r"\{.*?\}", raw, re.DOTALL)
+    if not json_match:
+        raise ValueError(f"AI response did not contain valid JSON: {raw!r}")
+    return json.loads(json_match.group())
+
+
+async def _analyze_with_openai(image_url: str) -> dict:
     if not settings.openai_api_key:
         raise AIProviderError("OPENAI_API_KEY が未設定です。")
 
@@ -72,10 +78,73 @@ async def analyze_card_image(image_url: str) -> dict:
         raise AIProviderError(msg) from e
 
     raw = response.choices[0].message.content or ""
+    return _extract_json(raw)
 
-    # JSON ブロックのみ抽出（```json ... ``` 形式も対応）
-    json_match = re.search(r"\{.*?\}", raw, re.DOTALL)
-    if not json_match:
-        raise ValueError(f"AI response did not contain valid JSON: {raw!r}")
 
-    return json.loads(json_match.group())
+async def _analyze_with_gemini(image_url: str) -> dict:
+    if not settings.gemini_api_key:
+        raise AIProviderError("GEMINI_API_KEY が未設定です。")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client_http:
+            image_resp = await client_http.get(image_url)
+            image_resp.raise_for_status()
+            mime_type = image_resp.headers.get("content-type", "image/jpeg").split(";")[0]
+            image_b64 = base64.b64encode(image_resp.content).decode("ascii")
+
+            endpoint = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-1.5-flash:generateContent"
+            )
+            gemini_resp = await client_http.post(
+                endpoint,
+                params={"key": settings.gemini_api_key},
+                json={
+                    "contents": [
+                        {
+                            "parts": [
+                                {"text": SYSTEM_PROMPT + "\nReturn only JSON."},
+                                {
+                                    "inline_data": {
+                                        "mime_type": mime_type,
+                                        "data": image_b64,
+                                    }
+                                },
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": 0,
+                        "maxOutputTokens": 256,
+                    },
+                },
+            )
+
+        if gemini_resp.status_code == 429:
+            raise AIQuotaExceededError("Gemini の無料枠上限に達しました。時間を置いて再試行してください。")
+        gemini_resp.raise_for_status()
+    except AIQuotaExceededError:
+        raise
+    except Exception as e:
+        raise AIProviderError(str(e)) from e
+
+    payload = gemini_resp.json()
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        raise ValueError(f"Gemini response is empty: {payload}")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "\n".join([p.get("text", "") for p in parts if p.get("text")]).strip()
+    return _extract_json(text)
+
+
+async def analyze_card_image(image_url: str) -> dict:
+    """
+    MTG カード画像からセットコードとコレクター番号を抽出する。
+    """
+    provider = settings.ai_provider.lower().strip()
+    if provider == "openai":
+        return await _analyze_with_openai(image_url)
+    if provider == "gemini":
+        return await _analyze_with_gemini(image_url)
+    raise AIProviderError("AI_PROVIDER は 'gemini' か 'openai' を指定してください。")

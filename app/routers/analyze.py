@@ -16,7 +16,7 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     """
     MTGカードの画像URLを受け取り、セットコードとコレクター番号を返す。
 
-    1. GPT-4o Vision で画像を解析してセットコード・番号を抽出
+    1. AI Vision で画像を解析してセットコード・番号を抽出
     2. Scryfall API で検証・補完
     """
     image_url = str(request.image_url)
@@ -31,7 +31,7 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     except AIProviderError as e:
         raise HTTPException(status_code=502, detail=f"AIプロバイダーエラー: {e}")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"OpenAI APIエラー: {e}")
+        raise HTTPException(status_code=502, detail=f"AI APIエラー: {e}")
 
     set_code: str = (ai_result.get("set_code") or "").strip().upper()
     collector_number: str = (ai_result.get("collector_number") or "").strip()
