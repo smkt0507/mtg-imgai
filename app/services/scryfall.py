@@ -45,7 +45,7 @@ async def search_cards_by_name_set(
             params={"q": query, "unique": "prints"},
             headers=_HEADERS,
         )
-        if resp.status_code == 404:
+        if resp.status_code in (404, 429):
             return []
         resp.raise_for_status()
         data = resp.json()

@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+import traceback
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 
 from app.routers.analyze import router as analyze_router
 from app.routers.scrape import router as scrape_router
@@ -21,6 +22,13 @@ app.add_middleware(
 
 app.include_router(analyze_router)
 app.include_router(scrape_router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    traceback.print_exc()
+    return JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

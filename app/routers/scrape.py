@@ -8,8 +8,8 @@ from app.services.vision import disambiguate_card_number
 
 router = APIRouter(prefix="/api", tags=["scrape"])
 
-# Scryfall API の負荷対策（同時リクエスト数を制限）
-_CONCURRENCY = 5
+# Scryfall API レート制限対策: リクエスト間隔 (秒)
+_SCRYFALL_INTERVAL = 0.15
 
 
 @router.post("/scrape", response_model=ScrapeResponse, summary="シングルスターの商品ページをスクレイプする")
@@ -18,7 +18,7 @@ async def scrape(request: ScrapeRequest) -> ScrapeResponse:
     シングルスターの商品グループURLを受け取り、全商品の情報を返す。
 
     1. ページ全体をスクレイピング（ページネーション対応）
-    2. 各商品の英語名 + セットコードで Scryfall 検索してカード番号を補完
+    2. 各商品の英語名 + セットコードで Scryfall 検索してカード番号を補完（シリアル処理）
     3. 複数候補が残った場合は AI で絞り込む
     """
     url = str(request.url)
@@ -31,28 +31,25 @@ async def scrape(request: ScrapeRequest) -> ScrapeResponse:
     if not raw_items:
         raise HTTPException(status_code=404, detail="商品が見つかりませんでした。")
 
-    # Scryfall 補完を並列実行（セマフォで同時数制限）
-    semaphore = asyncio.Semaphore(_CONCURRENCY)
-
-    async def enrich(item: dict) -> dict:
-        async with semaphore:
-            return await enrich_card_number(item)
-
-    enriched = await asyncio.gather(*[enrich(i) for i in raw_items])
+    # Scryfall 補完: シリアル処理でレート制限を回避
+    enriched: list[dict] = []
+    for item in raw_items:
+        result = await enrich_card_number(item)
+        enriched.append(result)
+        await asyncio.sleep(_SCRYFALL_INTERVAL)
 
     # 複数候補が残ったものだけ AI で disambiguate
-    async def maybe_disambiguate(item: dict) -> dict:
+    final: list[dict] = []
+    for item in enriched:
         candidates = item.get("candidates", [])
         if not candidates:
-            return {**item, "disambiguated_by_ai": False}
-        async with semaphore:
+            final.append({**item, "disambiguated_by_ai": False})
+        else:
             number = await disambiguate_card_number(
                 raw_name=item.get("raw_name", ""),
                 candidates=candidates,
             )
-        return {**item, "card_number": number, "disambiguated_by_ai": True, "candidates": []}
-
-    final = await asyncio.gather(*[maybe_disambiguate(i) for i in enriched])
+            final.append({**item, "card_number": number, "disambiguated_by_ai": True, "candidates": []})
 
     items = [
         CardItem(
