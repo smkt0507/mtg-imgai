@@ -27,7 +27,9 @@ app.include_router(scrape_router)
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     traceback.print_exc()
-    return JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
+    exc_name = type(exc).__name__
+    exc_msg = str(exc).strip() or "no message"
+    return JSONResponse(status_code=500, content={"detail": f"Internal error ({exc_name}): {exc_msg}"})
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

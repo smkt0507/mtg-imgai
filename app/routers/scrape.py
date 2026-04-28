@@ -157,7 +157,9 @@ async def scrape_start(request: ScrapeRequest) -> ScrapeStartResponse:
             job["finished_at"] = _now()
         except Exception as e:
             job["state"] = "failed"
-            job["error"] = f"Internal error: {e}"
+            exc_name = type(e).__name__
+            exc_msg = str(e).strip() or "no message"
+            job["error"] = f"Internal error ({exc_name}): {exc_msg}"
             job["finished_at"] = _now()
 
     asyncio.create_task(_worker())
