@@ -11,6 +11,45 @@ BASE_URL = "https://www.singlestar.jp"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
 
+def _extract_number_hint(text: str | None) -> Optional[str]:
+    if not text:
+        return None
+
+    match = re.search(r"\bNo\.\s*([0-9A-Za-z/]+)\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    return match.group(1)
+
+
+def _normalize_search_name(text: str | None) -> Optional[str]:
+    if not text:
+        return None
+
+    normalized = re.sub(r"\bNo\.\s*[0-9A-Za-z/]+\b", "", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s*[（(][^()（）]*[)）]\s*", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" -/")
+    return normalized or None
+
+
+def _extract_variant_signature(text: str) -> str:
+    lowered = text.lower()
+    variants: list[str] = []
+
+    if "ショーケース" in text or "showcase" in lowered:
+        variants.append("showcase")
+    if "拡張アート" in text or "エクステンデッドアート" in text or "extended art" in lowered or "extendedart" in lowered:
+        variants.append("extendedart")
+    if "全面アート" in text or "フルアート" in text or "full art" in lowered:
+        variants.append("fullart")
+    if "ボーダーレス" in text or "borderless" in lowered:
+        variants.append("borderless")
+    if "プロモ" in text or "promo" in lowered:
+        variants.append("promo")
+
+    return "|".join(sorted(set(variants))) or "plain"
+
+
 def _parse_goods_name(raw: str) -> dict:
     """
     商品名テキストをパースして各フィールドを返す。
@@ -49,10 +88,16 @@ def _parse_goods_name(raw: str) -> dict:
         card_name_ja = None
         card_name_en = name_part.strip() or None
 
+    search_name_en = _normalize_search_name(card_name_en)
+    number_hint = _extract_number_hint(card_name_en) or _extract_number_hint(raw)
+
     return {
         "raw_name": raw,
         "card_name_ja": card_name_ja,
         "card_name_en": card_name_en,
+        "search_name_en": search_name_en,
+        "number_hint": number_hint,
+        "variant_signature": _extract_variant_signature(raw),
         "lang": lang,
         "foil": foil,
         "set_code": set_code,

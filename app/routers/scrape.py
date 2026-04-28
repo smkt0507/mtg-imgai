@@ -16,7 +16,7 @@ from app.schemas import (
 )
 from app.services.scraper import scrape_product_group
 from app.services.scryfall import enrich_card_number
-from app.services.vision import disambiguate_card_number
+from app.services.vision import disambiguate_card_number, infer_card_number_from_product
 
 router = APIRouter(prefix="/api", tags=["scrape"])
 
@@ -91,18 +91,21 @@ class _IntervalLimiter:
             self._next_available = now + self.interval_seconds
 
 
-def _enrich_cache_key(item: dict) -> tuple[str | None, str | None, str | None, bool]:
+def _enrich_cache_key(item: dict) -> tuple[str | None, str | None, bool, str | None]:
     return (
-        item.get("card_name_en"),
+        item.get("search_name_en") or item.get("card_name_en"),
         item.get("set_code"),
-        item.get("lang"),
         bool(item.get("foil", False)),
+        item.get("number_hint"),
     )
 
 
-def _disambiguation_cache_key(raw_name: str, candidates: list[dict]) -> tuple[object, ...]:
+def _disambiguation_cache_key(item: dict, candidates: list[dict]) -> tuple[object, ...]:
     return (
-        raw_name,
+        item.get("search_name_en") or item.get("card_name_en") or item.get("raw_name"),
+        item.get("variant_signature"),
+        item.get("set_code"),
+        bool(item.get("foil", False)),
         tuple(
             (
                 candidate.get("collector_number"),
@@ -114,6 +117,16 @@ def _disambiguation_cache_key(raw_name: str, candidates: list[dict]) -> tuple[ob
             )
             for candidate in candidates
         ),
+    )
+
+
+def _ai_fallback_cache_key(item: dict) -> tuple[object, ...]:
+    return (
+        item.get("search_name_en") or item.get("card_name_en") or item.get("raw_name"),
+        item.get("variant_signature"),
+        item.get("set_code"),
+        bool(item.get("foil", False)),
+        item.get("number_hint"),
     )
 
 
@@ -136,8 +149,9 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
     process_semaphore = asyncio.Semaphore(settings.scrape_concurrency)
     ai_semaphore = asyncio.Semaphore(settings.ai_disambiguation_concurrency)
     scryfall_limiter = _IntervalLimiter(settings.scryfall_interval_seconds)
-    enrich_tasks: dict[tuple[str | None, str | None, str | None, bool], asyncio.Task] = {}
+    enrich_tasks: dict[tuple[str | None, str | None, bool, str | None], asyncio.Task] = {}
     disambiguation_tasks: dict[tuple[object, ...], asyncio.Task] = {}
+    ai_fallback_tasks: dict[tuple[object, ...], asyncio.Task] = {}
     http_limits = httpx.Limits(
         max_connections=max(8, settings.scrape_concurrency * 2),
         max_keepalive_connections=max(4, settings.scrape_concurrency),
@@ -161,15 +175,15 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
 
             return await task
 
-        async def _get_card_number(raw_name: str, candidates: list[dict]) -> tuple[str | None, bool]:
-            key = _disambiguation_cache_key(raw_name, candidates)
+        async def _get_card_number(item: dict, candidates: list[dict]) -> tuple[str | None, bool]:
+            key = _disambiguation_cache_key(item, candidates)
             async with cache_lock:
                 task = disambiguation_tasks.get(key)
                 if task is None:
                     async def _run_disambiguation() -> tuple[str | None, bool]:
                         async with ai_semaphore:
                             return await disambiguate_card_number(
-                                raw_name=raw_name,
+                                raw_name=item.get("raw_name", ""),
                                 candidates=candidates,
                                 client_http=client,
                             )
@@ -179,19 +193,39 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
 
             return await task
 
+        async def _infer_number_with_ai(item: dict) -> tuple[str | None, bool]:
+            key = _ai_fallback_cache_key(item)
+            async with cache_lock:
+                task = ai_fallback_tasks.get(key)
+                if task is None:
+                    async def _run_infer() -> tuple[str | None, bool]:
+                        async with ai_semaphore:
+                            number = await infer_card_number_from_product(item, client_http=client)
+                            return number, bool(number)
+
+                    task = asyncio.create_task(_run_infer())
+                    ai_fallback_tasks[key] = task
+
+            return await task
+
         async def _process_item(index: int, raw_item: dict) -> None:
             nonlocal processed_count
 
             async with process_semaphore:
                 item = await _get_enriched_item(raw_item)
                 candidates = item.get("candidates", [])
-                if not candidates:
-                    resolved = {**item, "disambiguated_by_ai": False}
+                if item.get("card_number"):
+                    resolved = {**item, "disambiguated_by_ai": False, "candidates": []}
+                elif not candidates:
+                    number, used_ai = await _infer_number_with_ai(item)
+                    resolved = {
+                        **item,
+                        "card_number": number,
+                        "disambiguated_by_ai": used_ai,
+                        "candidates": [],
+                    }
                 else:
-                    number, used_ai = await _get_card_number(
-                        raw_name=item.get("raw_name", ""),
-                        candidates=candidates,
-                    )
+                    number, used_ai = await _get_card_number(item, candidates)
                     resolved = {
                         **item,
                         "card_number": number,

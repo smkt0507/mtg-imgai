@@ -386,7 +386,7 @@
           </div>
           <div id="scrapeLoading" class="loading hidden">
             <div class="spinner"></div>
-            <span>スクレイプ中... (件数によっては1〜2分かかります)</span>
+            <span>スクレイプ中... (件数によっては10〜20分ほどかかることがあります)</span>
           </div>
           <div id="scrapeProgressWrap" class="progress-wrap hidden">
             <div class="progress-head">
@@ -627,11 +627,27 @@
         const pct =
           total > 0 ? Math.min(100, Math.floor((processed / total) * 100)) : 0;
         const elapsed = Number(status.elapsed_seconds || 0);
+        const eta =
+          total > 0 && processed > 0
+            ? Math.max(0, Math.round((elapsed / processed) * (total - processed)))
+            : null;
+        const etaText = eta != null ? ` / 残り約${formatDuration(eta)}` : "";
 
         document.getElementById("scrapeProgressText").textContent =
-          `${stage}: ${processed}/${total || "?"}件 (${elapsed}s)`;
+          `${stage}: ${processed}/${total || "?"}件 (${formatDuration(elapsed)}経過${etaText})`;
         document.getElementById("scrapeProgressPct").textContent = `${pct}%`;
         document.getElementById("scrapeProgressBar").style.width = `${pct}%`;
+      }
+
+      function formatDuration(totalSeconds) {
+        const seconds = Math.max(0, Math.floor(totalSeconds || 0));
+        if (seconds < 60) return `${seconds}秒`;
+        const minutes = Math.floor(seconds / 60);
+        const remainSeconds = seconds % 60;
+        if (minutes < 60) return `${minutes}分${remainSeconds}秒`;
+        const hours = Math.floor(minutes / 60);
+        const remainMinutes = minutes % 60;
+        return `${hours}時間${remainMinutes}分`;
       }
 
       function delay(ms) {

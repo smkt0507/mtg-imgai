@@ -258,6 +258,23 @@ Respond ONLY with valid JSON:
 If you truly cannot decide, return {"collector_number": null}
 """
 
+INFER_NUMBER_PROMPT = """You are an expert Magic: The Gathering card identifier.
+
+You are given a product title from a Japanese card shop for a card in a known set.
+Infer the most likely collector number for the product.
+
+Rules:
+- Use the set code, English card name, Japanese card name, and any special treatment clues in the title.
+- Clues like ショーケース, ボーダーレス, 全面アート, フルアート, 拡張アート, エクステンデッドアート matter.
+- If the title contains a direct number hint such as No.202, that is usually the collector number.
+- If you are not confident, return null instead of guessing.
+
+Respond ONLY with valid JSON:
+{"collector_number": "123"}
+
+If you cannot determine the exact collector number, return {"collector_number": null}
+"""
+
 
 def _candidate_sort_key(candidate: dict) -> str:
     return str(candidate.get("collector_number") or "").zfill(10)
@@ -297,9 +314,9 @@ def _score_candidate_against_title(raw_name: str, candidate: dict) -> tuple[int,
         if "extendedart" in frame_effects:
             score += 4
 
-    if any(keyword in raw_name for keyword in ("フルアート",)) or "full art" in title:
+    if any(keyword in raw_name for keyword in ("全面アート", "フルアート")) or "full art" in title:
         matched_keyword = True
-        if candidate.get("full_art"):
+        if candidate.get("full_art") or candidate.get("border_color") == "borderless":
             score += 3
 
     if any(keyword in raw_name for keyword in ("プロモ", "PROMO")) or "promo" in title:
@@ -372,6 +389,37 @@ async def disambiguate_card_number(
     return result.get("collector_number"), True
 
 
+def _build_infer_number_prompt(item: dict) -> str:
+    return (
+        f"Product title: {item.get('raw_name', '')}\n"
+        f"Set code: {item.get('set_code', '')}\n"
+        f"English card name: {item.get('card_name_en', '')}\n"
+        f"Japanese card name: {item.get('card_name_ja', '')}\n"
+        f"Search name: {item.get('search_name_en', '')}\n"
+        f"Variant signature: {item.get('variant_signature', '')}\n"
+        f"Foil: {bool(item.get('foil', False))}\n"
+        f"Number hint: {item.get('number_hint') or ''}\n"
+    )
+
+
+async def infer_card_number_from_product(
+    item: dict,
+    client_http: httpx.AsyncClient | None = None,
+) -> str | None:
+    provider = settings.ai_provider.lower().strip()
+    prompt_user = _build_infer_number_prompt(item)
+
+    try:
+        if provider == "openai":
+            result = await _infer_number_openai(prompt_user)
+        else:
+            result = await _infer_number_gemini(prompt_user, client_http=client_http)
+    except Exception:
+        return None
+
+    return result.get("collector_number")
+
+
 async def _disambiguate_openai(prompt_user: str) -> dict:
     if not settings.openai_api_key:
         raise AIProviderError("OPENAI_API_KEY が未設定です。")
@@ -379,6 +427,21 @@ async def _disambiguate_openai(prompt_user: str) -> dict:
         model="gpt-4o",
         messages=[
             {"role": "system", "content": DISAMBIGUATE_PROMPT},
+            {"role": "user", "content": prompt_user},
+        ],
+        max_tokens=64,
+        temperature=0,
+    )
+    return _extract_json(response.choices[0].message.content or "")
+
+
+async def _infer_number_openai(prompt_user: str) -> dict:
+    if not settings.openai_api_key:
+        raise AIProviderError("OPENAI_API_KEY が未設定です。")
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": INFER_NUMBER_PROMPT},
             {"role": "user", "content": prompt_user},
         ],
         max_tokens=64,
@@ -396,6 +459,17 @@ async def _disambiguate_gemini(prompt_user: str, client_http: httpx.AsyncClient 
 
     async with httpx.AsyncClient(timeout=30.0) as local_client:
         return await _disambiguate_gemini_with_client(local_client, prompt_user)
+
+
+async def _infer_number_gemini(prompt_user: str, client_http: httpx.AsyncClient | None = None) -> dict:
+    if not settings.gemini_api_key:
+        raise AIProviderError("GEMINI_API_KEY が未設定です。")
+
+    if client_http is not None:
+        return await _infer_number_gemini_with_client(client_http, prompt_user)
+
+    async with httpx.AsyncClient(timeout=30.0) as local_client:
+        return await _infer_number_gemini_with_client(local_client, prompt_user)
 
 
 async def _disambiguate_gemini_with_client(client_http: httpx.AsyncClient, prompt_user: str) -> dict:
@@ -432,3 +506,39 @@ async def _disambiguate_gemini_with_client(client_http: httpx.AsyncClient, promp
         return _extract_json(text)
 
     raise AIProviderError("Gemini の呼び出しに失敗しました。")
+
+
+async def _infer_number_gemini_with_client(client_http: httpx.AsyncClient, prompt_user: str) -> dict:
+    model_candidates = await _get_gemini_model_candidates(client_http)
+    if not model_candidates:
+        raise AIProviderError("Gemini の利用可能モデルが見つかりませんでした。")
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": INFER_NUMBER_PROMPT + "\n\n" + prompt_user},
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 64},
+    }
+
+    for api_version, model_name in model_candidates:
+        endpoint = (
+            f"https://generativelanguage.googleapis.com/{api_version}/models/"
+            f"{model_name}:generateContent"
+        )
+        resp = await client_http.post(
+            endpoint,
+            params={"key": settings.gemini_api_key},
+            json=payload,
+        )
+        if resp.status_code in (404, 429):
+            continue
+        resp.raise_for_status()
+        parts = resp.json()["candidates"][0]["content"]["parts"]
+        text = "\n".join(p.get("text", "") for p in parts).strip()
+        return _extract_json(text)
+
+    raise AIProviderError("Gemini の推定呼び出しに失敗しました。")
