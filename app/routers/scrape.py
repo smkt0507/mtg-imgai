@@ -3,8 +3,10 @@ import json
 import os
 import time
 import uuid
+import httpx
 from fastapi import APIRouter, HTTPException
 
+from app.config import settings
 from app.schemas import (
     ScrapeRequest,
     ScrapeResponse,
@@ -18,8 +20,6 @@ from app.services.vision import disambiguate_card_number
 
 router = APIRouter(prefix="/api", tags=["scrape"])
 
-# Scryfall API レート制限対策: リクエスト間隔 (秒)
-_SCRYFALL_INTERVAL = 0.15
 _JOBS: dict[str, dict] = {}
 _MAX_RUNNING_JOBS = 1
 _JOB_TTL_SECONDS = 1800
@@ -72,6 +72,51 @@ def _running_jobs_count() -> int:
     return sum(1 for job in _JOBS.values() if job.get("state") == "running")
 
 
+class _IntervalLimiter:
+    def __init__(self, interval_seconds: float) -> None:
+        self.interval_seconds = max(0.0, interval_seconds)
+        self._lock = asyncio.Lock()
+        self._next_available = 0.0
+
+    async def wait(self) -> None:
+        if self.interval_seconds <= 0:
+            return
+
+        async with self._lock:
+            now = time.monotonic()
+            wait_seconds = max(0.0, self._next_available - now)
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+                now = time.monotonic()
+            self._next_available = now + self.interval_seconds
+
+
+def _enrich_cache_key(item: dict) -> tuple[str | None, str | None, str | None, bool]:
+    return (
+        item.get("card_name_en"),
+        item.get("set_code"),
+        item.get("lang"),
+        bool(item.get("foil", False)),
+    )
+
+
+def _disambiguation_cache_key(raw_name: str, candidates: list[dict]) -> tuple[object, ...]:
+    return (
+        raw_name,
+        tuple(
+            (
+                candidate.get("collector_number"),
+                candidate.get("name"),
+                tuple(candidate.get("frame_effects") or []),
+                candidate.get("border_color"),
+                bool(candidate.get("full_art")),
+                bool(candidate.get("promo")),
+            )
+            for candidate in candidates
+        ),
+    )
+
+
 async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
     try:
         raw_items = await scrape_product_group(url)
@@ -84,23 +129,91 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
     if job is not None:
         _set_job_progress(job, stage="processing", processed=0, total=len(raw_items))
 
-    # 1件ずつ補完とAI特定を実行して、中間配列の保持を最小化する
-    final: list[dict] = []
-    for index, raw_item in enumerate(raw_items, start=1):
-        item = await enrich_card_number(raw_item)
-        candidates = item.get("candidates", [])
-        if not candidates:
-            final.append({**item, "disambiguated_by_ai": False})
-        else:
-            number = await disambiguate_card_number(
-                raw_name=item.get("raw_name", ""),
-                candidates=candidates,
-            )
-            final.append({**item, "card_number": number, "disambiguated_by_ai": True, "candidates": []})
+    final: list[dict | None] = [None] * len(raw_items)
+    processed_count = 0
+    progress_lock = asyncio.Lock()
+    cache_lock = asyncio.Lock()
+    process_semaphore = asyncio.Semaphore(settings.scrape_concurrency)
+    ai_semaphore = asyncio.Semaphore(settings.ai_disambiguation_concurrency)
+    scryfall_limiter = _IntervalLimiter(settings.scryfall_interval_seconds)
+    enrich_tasks: dict[tuple[str | None, str | None, str | None, bool], asyncio.Task] = {}
+    disambiguation_tasks: dict[tuple[object, ...], asyncio.Task] = {}
+    http_limits = httpx.Limits(
+        max_connections=max(8, settings.scrape_concurrency * 2),
+        max_keepalive_connections=max(4, settings.scrape_concurrency),
+    )
 
-        if job is not None:
-            _set_job_progress(job, stage="processing", processed=index, total=len(raw_items))
-        await asyncio.sleep(_SCRYFALL_INTERVAL)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), limits=http_limits) as client:
+        async def _get_enriched_item(raw_item: dict) -> dict:
+            key = _enrich_cache_key(raw_item)
+            if not key[0] or not key[1]:
+                return await enrich_card_number(raw_item)
+
+            async with cache_lock:
+                task = enrich_tasks.get(key)
+                if task is None:
+                    async def _run_enrich() -> dict:
+                        await scryfall_limiter.wait()
+                        return await enrich_card_number(raw_item, client=client)
+
+                    task = asyncio.create_task(_run_enrich())
+                    enrich_tasks[key] = task
+
+            return await task
+
+        async def _get_card_number(raw_name: str, candidates: list[dict]) -> tuple[str | None, bool]:
+            key = _disambiguation_cache_key(raw_name, candidates)
+            async with cache_lock:
+                task = disambiguation_tasks.get(key)
+                if task is None:
+                    async def _run_disambiguation() -> tuple[str | None, bool]:
+                        async with ai_semaphore:
+                            return await disambiguate_card_number(
+                                raw_name=raw_name,
+                                candidates=candidates,
+                                client_http=client,
+                            )
+
+                    task = asyncio.create_task(_run_disambiguation())
+                    disambiguation_tasks[key] = task
+
+            return await task
+
+        async def _process_item(index: int, raw_item: dict) -> None:
+            nonlocal processed_count
+
+            async with process_semaphore:
+                item = await _get_enriched_item(raw_item)
+                candidates = item.get("candidates", [])
+                if not candidates:
+                    resolved = {**item, "disambiguated_by_ai": False}
+                else:
+                    number, used_ai = await _get_card_number(
+                        raw_name=item.get("raw_name", ""),
+                        candidates=candidates,
+                    )
+                    resolved = {
+                        **item,
+                        "card_number": number,
+                        "disambiguated_by_ai": used_ai,
+                        "candidates": [],
+                    }
+
+                final[index] = resolved
+
+                if job is not None:
+                    async with progress_lock:
+                        processed_count += 1
+                        _set_job_progress(job, stage="processing", processed=processed_count, total=len(raw_items))
+
+        tasks = [
+            asyncio.create_task(_process_item(index, raw_item))
+            for index, raw_item in enumerate(raw_items)
+        ]
+        await asyncio.gather(*tasks)
+
+    if any(item is None for item in final):
+        raise HTTPException(status_code=500, detail="一部の結果を組み立てられませんでした。")
 
     items = [
         CardItem(
@@ -115,6 +228,7 @@ async def _run_scrape(url: str, job: dict | None = None) -> ScrapeResponse:
             disambiguated_by_ai=i.get("disambiguated_by_ai", False),
         )
         for i in final
+        if i is not None
     ]
 
     if job is not None:
@@ -216,7 +330,7 @@ async def scrape(request: ScrapeRequest) -> ScrapeResponse:
     シングルスターの商品グループURLを受け取り、全商品の情報を返す。
 
     1. ページ全体をスクレイピング（ページネーション対応）
-    2. 各商品の英語名 + セットコードで Scryfall 検索してカード番号を補完（シリアル処理）
+    2. 各商品の英語名 + セットコードで Scryfall 検索してカード番号を補完（少量並列）
     3. 複数候補が残った場合は AI で絞り込む
     """
     return await _run_scrape(str(request.url))

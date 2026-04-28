@@ -1,8 +1,11 @@
 import re
 import asyncio
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Optional
 import httpx
 from bs4 import BeautifulSoup
+
+from app.config import settings
 
 BASE_URL = "https://www.singlestar.jp"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
@@ -68,6 +71,21 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> BeautifulSoup:
     return BeautifulSoup(resp.text, "html.parser")
 
 
+def _build_page_url(url: str, page: int) -> str:
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page)
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urlencode(query),
+            parsed.fragment,
+        )
+    )
+
+
 async def scrape_product_group(url: str) -> list[dict]:
     """
     シングルスターの商品グループページ全ページをスクレイピングして
@@ -94,13 +112,20 @@ async def scrape_product_group(url: str) -> list[dict]:
 
         # 2ページ目以降を並列取得
         if max_page > 1:
+            page_semaphore = asyncio.Semaphore(settings.scraper_page_concurrency)
+
+            async def _fetch_page_limited(page_no: int) -> BeautifulSoup:
+                async with page_semaphore:
+                    return await _fetch_page(client, _build_page_url(url, page_no))
+
             tasks = [
-                _fetch_page(client, f"{url}?page={p}")
-                for p in range(2, max_page + 1)
+                asyncio.create_task(_fetch_page_limited(page_no))
+                for page_no in range(2, max_page + 1)
             ]
-            pages = await asyncio.gather(*tasks, return_exceptions=True)
-            for page in pages:
-                if isinstance(page, Exception):
+            for task in asyncio.as_completed(tasks):
+                try:
+                    page = await task
+                except Exception:
                     continue
                 results.extend(_parse_items(page))
 

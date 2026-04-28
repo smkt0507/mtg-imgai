@@ -1,6 +1,8 @@
+import asyncio
 import base64
 import json
 import re
+import time
 import httpx
 from openai import AsyncOpenAI
 
@@ -18,6 +20,9 @@ class AIProviderError(Exception):
 
 
 GEMINI_API_VERSIONS = ["v1beta", "v1"]
+_GEMINI_MODELS_CACHE: list[tuple[str, str]] = []
+_GEMINI_MODELS_CACHE_EXPIRES_AT = 0.0
+_GEMINI_MODELS_CACHE_LOCK = asyncio.Lock()
 
 SYSTEM_PROMPT = """You are an expert Magic: The Gathering card identifier.
 When given an image of an MTG card, extract the set code and collector number printed at the bottom of the card.
@@ -84,6 +89,25 @@ async def _discover_gemini_models(client_http: httpx.AsyncClient) -> list[tuple[
     return discovered
 
 
+async def _get_gemini_model_candidates(client_http: httpx.AsyncClient) -> list[tuple[str, str]]:
+    global _GEMINI_MODELS_CACHE
+    global _GEMINI_MODELS_CACHE_EXPIRES_AT
+
+    now = time.monotonic()
+    if _GEMINI_MODELS_CACHE and now < _GEMINI_MODELS_CACHE_EXPIRES_AT:
+        return list(_GEMINI_MODELS_CACHE)
+
+    async with _GEMINI_MODELS_CACHE_LOCK:
+        now = time.monotonic()
+        if _GEMINI_MODELS_CACHE and now < _GEMINI_MODELS_CACHE_EXPIRES_AT:
+            return list(_GEMINI_MODELS_CACHE)
+
+        discovered = await _discover_gemini_models(client_http)
+        _GEMINI_MODELS_CACHE = discovered
+        _GEMINI_MODELS_CACHE_EXPIRES_AT = now + settings.gemini_model_cache_ttl_seconds
+        return list(discovered)
+
+
 async def _analyze_with_openai(image_url: str) -> dict:
     if not settings.openai_api_key:
         raise AIProviderError("OPENAI_API_KEY が未設定です。")
@@ -137,7 +161,7 @@ async def _analyze_with_gemini(image_url: str) -> dict:
             mime_type = image_resp.headers.get("content-type", "image/jpeg").split(";")[0]
             image_b64 = base64.b64encode(image_resp.content).decode("ascii")
 
-            model_candidates = await _discover_gemini_models(client_http)
+            model_candidates = await _get_gemini_model_candidates(client_http)
             if not model_candidates:
                 raise AIProviderError(
                     "Gemini の利用可能モデル取得に失敗しました。"
@@ -235,14 +259,98 @@ If you truly cannot decide, return {"collector_number": null}
 """
 
 
-async def disambiguate_card_number(raw_name: str, candidates: list[dict]) -> str | None:
+def _candidate_sort_key(candidate: dict) -> str:
+    return str(candidate.get("collector_number") or "").zfill(10)
+
+
+def _is_special_treatment(candidate: dict) -> bool:
+    return bool(
+        candidate.get("frame_effects")
+        or candidate.get("border_color") == "borderless"
+        or candidate.get("full_art")
+        or candidate.get("promo")
+    )
+
+
+def _score_candidate_against_title(raw_name: str, candidate: dict) -> tuple[int, bool]:
+    title = raw_name.lower()
+    frame_effects = {str(effect).lower() for effect in candidate.get("frame_effects", [])}
+    score = 0
+    matched_keyword = False
+
+    if any(keyword in raw_name for keyword in ("ショーケース",)) or "showcase" in title:
+        matched_keyword = True
+        if "showcase" in frame_effects:
+            score += 4
+
+    if any(keyword in raw_name for keyword in ("ボーダーレス",)) or "borderless" in title:
+        matched_keyword = True
+        if candidate.get("border_color") == "borderless" or "borderless" in frame_effects:
+            score += 4
+
+    if (
+        any(keyword in raw_name for keyword in ("エクステンデッドアート", "拡張アート"))
+        or "extended art" in title
+        or "extendedart" in title
+    ):
+        matched_keyword = True
+        if "extendedart" in frame_effects:
+            score += 4
+
+    if any(keyword in raw_name for keyword in ("フルアート",)) or "full art" in title:
+        matched_keyword = True
+        if candidate.get("full_art"):
+            score += 3
+
+    if any(keyword in raw_name for keyword in ("プロモ", "PROMO")) or "promo" in title:
+        matched_keyword = True
+        if candidate.get("promo"):
+            score += 3
+
+    return score, matched_keyword
+
+
+def _choose_candidate_without_ai(raw_name: str, candidates: list[dict]) -> str | None:
+    scored: list[tuple[int, dict]] = []
+    saw_keyword = False
+    for candidate in candidates:
+        score, matched_keyword = _score_candidate_against_title(raw_name, candidate)
+        if matched_keyword:
+            saw_keyword = True
+        scored.append((score, candidate))
+
+    if saw_keyword:
+        best_score = max(score for score, _ in scored)
+        if best_score > 0:
+            best = [candidate for score, candidate in scored if score == best_score]
+            if len(best) == 1:
+                return best[0]["collector_number"]
+        return None
+
+    plain_candidates = [candidate for candidate in candidates if not _is_special_treatment(candidate)]
+    if len(plain_candidates) == 1:
+        return plain_candidates[0]["collector_number"]
+
+    return None
+
+
+async def disambiguate_card_number(
+    raw_name: str,
+    candidates: list[dict],
+    client_http: httpx.AsyncClient | None = None,
+) -> tuple[str | None, bool]:
     """
-    商品名と Scryfall 候補リストから最適なコレクター番号を AI で選ぶ。
+    商品名と Scryfall 候補リストから最適なコレクター番号を返す。
+    戻り値は (collector_number, used_ai)。
     """
     if not candidates:
-        return None
+        return None, False
     if len(candidates) == 1:
-        return candidates[0]["collector_number"]
+        return candidates[0]["collector_number"], False
+
+    heuristic_number = _choose_candidate_without_ai(raw_name, candidates)
+    if heuristic_number is not None:
+        return heuristic_number, False
 
     prompt_user = (
         f"Product title: {raw_name}\n\n"
@@ -255,13 +363,13 @@ async def disambiguate_card_number(raw_name: str, candidates: list[dict]) -> str
         if provider == "openai":
             result = await _disambiguate_openai(prompt_user)
         else:
-            result = await _disambiguate_gemini(prompt_user)
+            result = await _disambiguate_gemini(prompt_user, client_http=client_http)
     except Exception:
         # AI が失敗したら最小番号を返す（フォールバック）
-        nums = sorted(candidates, key=lambda c: c["collector_number"].zfill(10))
-        return nums[0]["collector_number"]
+        nums = sorted(candidates, key=_candidate_sort_key)
+        return nums[0]["collector_number"], False
 
-    return result.get("collector_number")
+    return result.get("collector_number"), True
 
 
 async def _disambiguate_openai(prompt_user: str) -> dict:
@@ -279,42 +387,48 @@ async def _disambiguate_openai(prompt_user: str) -> dict:
     return _extract_json(response.choices[0].message.content or "")
 
 
-async def _disambiguate_gemini(prompt_user: str) -> dict:
+async def _disambiguate_gemini(prompt_user: str, client_http: httpx.AsyncClient | None = None) -> dict:
     if not settings.gemini_api_key:
         raise AIProviderError("GEMINI_API_KEY が未設定です。")
 
-    async with httpx.AsyncClient(timeout=30.0) as client_http:
-        model_candidates = await _discover_gemini_models(client_http)
-        if not model_candidates:
-            raise AIProviderError("Gemini の利用可能モデルが見つかりませんでした。")
+    if client_http is not None:
+        return await _disambiguate_gemini_with_client(client_http, prompt_user)
 
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": DISAMBIGUATE_PROMPT + "\n\n" + prompt_user},
-                    ]
-                }
-            ],
-            "generationConfig": {"temperature": 0, "maxOutputTokens": 64},
-        }
+    async with httpx.AsyncClient(timeout=30.0) as local_client:
+        return await _disambiguate_gemini_with_client(local_client, prompt_user)
 
-        for api_version, model_name in model_candidates:
-            endpoint = (
-                f"https://generativelanguage.googleapis.com/{api_version}/models/"
-                f"{model_name}:generateContent"
-            )
-            resp = await client_http.post(
-                endpoint,
-                params={"key": settings.gemini_api_key},
-                json=payload,
-            )
-            if resp.status_code in (404, 429):
-                continue
-            resp.raise_for_status()
-            parts = resp.json()["candidates"][0]["content"]["parts"]
-            text = "\n".join(p.get("text", "") for p in parts).strip()
-            return _extract_json(text)
+
+async def _disambiguate_gemini_with_client(client_http: httpx.AsyncClient, prompt_user: str) -> dict:
+    model_candidates = await _get_gemini_model_candidates(client_http)
+    if not model_candidates:
+        raise AIProviderError("Gemini の利用可能モデルが見つかりませんでした。")
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": DISAMBIGUATE_PROMPT + "\n\n" + prompt_user},
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 64},
+    }
+
+    for api_version, model_name in model_candidates:
+        endpoint = (
+            f"https://generativelanguage.googleapis.com/{api_version}/models/"
+            f"{model_name}:generateContent"
+        )
+        resp = await client_http.post(
+            endpoint,
+            params={"key": settings.gemini_api_key},
+            json=payload,
+        )
+        if resp.status_code in (404, 429):
+            continue
+        resp.raise_for_status()
+        parts = resp.json()["candidates"][0]["content"]["parts"]
+        text = "\n".join(p.get("text", "") for p in parts).strip()
+        return _extract_json(text)
 
     raise AIProviderError("Gemini の呼び出しに失敗しました。")
-

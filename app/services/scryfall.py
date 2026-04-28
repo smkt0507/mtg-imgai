@@ -1,4 +1,3 @@
-import asyncio
 import httpx
 from typing import Optional
 
@@ -6,21 +5,33 @@ SCRYFALL_API_BASE = "https://api.scryfall.com"
 _HEADERS = {"User-Agent": "mtg-imgai/1.0"}
 
 
-async def lookup_card(set_code: str, collector_number: str) -> Optional[dict]:
+async def _lookup_card(client: httpx.AsyncClient, set_code: str, collector_number: str) -> Optional[dict]:
     """
     Scryfall API でセットコード + コレクター番号からカード情報を取得する。
     見つからない場合は None を返す。
     """
     url = f"{SCRYFALL_API_BASE}/cards/{set_code.lower()}/{collector_number}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url, headers=_HEADERS)
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return resp.json()
+    resp = await client.get(url, headers=_HEADERS)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
 
 
-async def search_cards_by_name_set(
+async def lookup_card(
+    set_code: str,
+    collector_number: str,
+    client: httpx.AsyncClient | None = None,
+) -> Optional[dict]:
+    if client is not None:
+        return await _lookup_card(client, set_code, collector_number)
+
+    async with httpx.AsyncClient(timeout=10.0) as local_client:
+        return await _lookup_card(local_client, set_code, collector_number)
+
+
+async def _search_cards_by_name_set(
+    client: httpx.AsyncClient,
     card_name_en: str,
     set_code: str,
     lang: Optional[str] = None,
@@ -39,17 +50,16 @@ async def search_cards_by_name_set(
     query = " ".join(q_parts)
     url = f"{SCRYFALL_API_BASE}/cards/search"
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(
-            url,
-            params={"q": query, "unique": "prints"},
-            headers=_HEADERS,
-        )
-        if resp.status_code in (404, 429):
-            return []
-        resp.raise_for_status()
-        data = resp.json()
-        cards = data.get("data", [])
+    resp = await client.get(
+        url,
+        params={"q": query, "unique": "prints"},
+        headers=_HEADERS,
+    )
+    if resp.status_code in (404, 429):
+        return []
+    resp.raise_for_status()
+    data = resp.json()
+    cards = data.get("data", [])
 
     # foil フラグで絞り込み（foil=True なら foil 版のみ）
     if foil:
@@ -60,7 +70,27 @@ async def search_cards_by_name_set(
     return cards
 
 
-async def enrich_card_number(item: dict) -> dict:
+async def search_cards_by_name_set(
+    card_name_en: str,
+    set_code: str,
+    lang: Optional[str] = None,
+    foil: bool = False,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict]:
+    if client is not None:
+        return await _search_cards_by_name_set(client, card_name_en, set_code, lang=lang, foil=foil)
+
+    async with httpx.AsyncClient(timeout=10.0) as local_client:
+        return await _search_cards_by_name_set(
+            local_client,
+            card_name_en,
+            set_code,
+            lang=lang,
+            foil=foil,
+        )
+
+
+async def enrich_card_number(item: dict, client: httpx.AsyncClient | None = None) -> dict:
     """
     スクレイプ結果 1件に Scryfall のカード番号を補完する。
     複数候補がある場合は candidates リストも返す。
@@ -77,6 +107,7 @@ async def enrich_card_number(item: dict) -> dict:
         set_code=set_code,
         lang=item.get("lang"),
         foil=item.get("foil", False),
+        client=client,
     )
 
     if len(candidates) == 1:
