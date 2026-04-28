@@ -16,6 +16,15 @@ class AIQuotaExceededError(Exception):
 class AIProviderError(Exception):
     """AI プロバイダー側の一般的な失敗を表す例外。"""
 
+
+GEMINI_MODEL_CANDIDATES = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+]
+
+GEMINI_API_VERSIONS = ["v1beta", "v1"]
+
 SYSTEM_PROMPT = """You are an expert Magic: The Gathering card identifier.
 When given an image of an MTG card, extract the set code and collector number printed at the bottom of the card.
 The set code is typically a 3-5 character uppercase abbreviation (e.g., OTJ, MKM, BRO, ONE).
@@ -85,6 +94,7 @@ async def _analyze_with_gemini(image_url: str) -> dict:
     if not settings.gemini_api_key:
         raise AIProviderError("GEMINI_API_KEY が未設定です。")
 
+    last_error = None
     try:
         async with httpx.AsyncClient(timeout=30.0) as client_http:
             image_resp = await client_http.get(image_url)
@@ -92,50 +102,67 @@ async def _analyze_with_gemini(image_url: str) -> dict:
             mime_type = image_resp.headers.get("content-type", "image/jpeg").split(";")[0]
             image_b64 = base64.b64encode(image_resp.content).decode("ascii")
 
-            endpoint = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                "gemini-1.5-flash:generateContent"
-            )
-            gemini_resp = await client_http.post(
-                endpoint,
-                params={"key": settings.gemini_api_key},
-                json={
-                    "contents": [
-                        {
-                            "parts": [
-                                {"text": SYSTEM_PROMPT + "\nReturn only JSON."},
-                                {
-                                    "inline_data": {
-                                        "mime_type": mime_type,
-                                        "data": image_b64,
-                                    }
-                                },
-                            ]
-                        }
-                    ],
-                    "generationConfig": {
-                        "temperature": 0,
-                        "maxOutputTokens": 256,
-                    },
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": SYSTEM_PROMPT + "\nReturn only JSON."},
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_type,
+                                    "data": image_b64,
+                                }
+                            },
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0,
+                    "maxOutputTokens": 256,
                 },
-            )
+            }
 
-        if gemini_resp.status_code == 429:
-            raise AIQuotaExceededError("Gemini の無料枠上限に達しました。時間を置いて再試行してください。")
-        gemini_resp.raise_for_status()
+            gemini_resp = None
+            for api_version in GEMINI_API_VERSIONS:
+                for model_name in GEMINI_MODEL_CANDIDATES:
+                    endpoint = (
+                        f"https://generativelanguage.googleapis.com/{api_version}/models/"
+                        f"{model_name}:generateContent"
+                    )
+                    gemini_resp = await client_http.post(
+                        endpoint,
+                        params={"key": settings.gemini_api_key},
+                        json=payload,
+                    )
+
+                    if gemini_resp.status_code == 429:
+                        raise AIQuotaExceededError(
+                            "Gemini の無料枠上限に達しました。時間を置いて再試行してください。"
+                        )
+                    if gemini_resp.status_code == 404:
+                        last_error = (
+                            f"model not found: {model_name} on {api_version}"
+                        )
+                        continue
+
+                    gemini_resp.raise_for_status()
+                    payload_resp = gemini_resp.json()
+                    candidates = payload_resp.get("candidates") or []
+                    if not candidates:
+                        raise ValueError(f"Gemini response is empty: {payload_resp}")
+
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text = "\n".join([p.get("text", "") for p in parts if p.get("text")]).strip()
+                    return _extract_json(text)
+
+            raise AIProviderError(
+                "Gemini の利用可能モデルが見つかりませんでした。"
+                f" 最終エラー: {last_error or 'unknown'}"
+            )
     except AIQuotaExceededError:
         raise
     except Exception as e:
         raise AIProviderError(str(e)) from e
-
-    payload = gemini_resp.json()
-    candidates = payload.get("candidates") or []
-    if not candidates:
-        raise ValueError(f"Gemini response is empty: {payload}")
-
-    parts = candidates[0].get("content", {}).get("parts", [])
-    text = "\n".join([p.get("text", "") for p in parts if p.get("text")]).strip()
-    return _extract_json(text)
 
 
 async def analyze_card_image(image_url: str) -> dict:
