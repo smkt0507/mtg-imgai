@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MTG Card Analyzer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 860px;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 1.8rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+      background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #9ca3af;
+      font-size: 0.9rem;
+      margin-bottom: 32px;
+    }
+
+    .card {
+      background: #16213e;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 28px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #a78bfa;
+      margin-bottom: 8px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    input[type="url"] {
+      flex: 1;
+      background: #0f3460;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: #e0e0e0;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="url"]:focus {
+      border-color: #a78bfa;
+    }
+
+    button#analyzeBtn {
+      background: linear-gradient(135deg, #7c3aed, #2563eb);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 24px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.2s;
+    }
+
+    button#analyzeBtn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* プレビュー + 結果 の横並び */
+    .result-layout {
+      display: flex;
+      gap: 24px;
+      margin-top: 28px;
+      align-items: flex-start;
+    }
+
+    .preview-area {
+      flex: 0 0 auto;
+      width: 220px;
+    }
+
+    .preview-area img {
+      width: 100%;
+      border-radius: 10px;
+      border: 2px solid #374151;
+      display: block;
+    }
+
+    .preview-area .img-label {
+      text-align: center;
+      font-size: 0.75rem;
+      color: #6b7280;
+      margin-top: 6px;
+    }
+
+    .result-area {
+      flex: 1;
+    }
+
+    /* ローディング */
+    .loading {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #a78bfa;
+      font-size: 0.95rem;
+      margin-top: 28px;
+    }
+
+    .spinner {
+      width: 22px;
+      height: 22px;
+      border: 3px solid #374151;
+      border-top-color: #a78bfa;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* 結果テーブル */
+    .result-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+
+    .result-table tr:not(:last-child) td {
+      border-bottom: 1px solid #2d3748;
+    }
+
+    .result-table td {
+      padding: 10px 6px;
+      vertical-align: top;
+    }
+
+    .result-table td:first-child {
+      color: #9ca3af;
+      font-weight: 600;
+      width: 44%;
+      white-space: nowrap;
+    }
+
+    .result-table td:last-child {
+      color: #e0e0e0;
+      word-break: break-all;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    .badge-ok  { background: #065f46; color: #6ee7b7; }
+    .badge-ng  { background: #7f1d1d; color: #fca5a5; }
+
+    a.scryfall-link {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+    a.scryfall-link:hover { text-decoration: underline; }
+
+    /* エラー */
+    .error-box {
+      margin-top: 20px;
+      background: #450a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      padding: 14px 18px;
+      color: #fca5a5;
+      font-size: 0.9rem;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>MTG Card Analyzer</h1>
+    <p class="subtitle">カード画像URLを入力すると、セットコードとコレクター番号をAIで解析します</p>
+
+    <div class="card">
+      <label for="imageUrl">画像 URL</label>
+      <div class="input-row">
+        <input
+          type="url"
+          id="imageUrl"
+          placeholder="https://example.com/card.jpg"
+          value="https://goodgame.co.jp/cdn/shop/files/1f4ebb5a-936a-45bb-9bfd-5cd0c6d2fd97.jpg?v=1776398333"
+        />
+        <button id="analyzeBtn" onclick="analyze()">解析する</button>
+      </div>
+
+      <!-- ローディング -->
+      <div id="loading" class="loading hidden">
+        <div class="spinner"></div>
+        <span>AIが解析中です...</span>
+      </div>
+
+      <!-- エラー -->
+      <div id="errorBox" class="error-box hidden"></div>
+
+      <!-- 結果 -->
+      <div id="resultLayout" class="result-layout hidden">
+        <!-- 左：入力画像プレビュー -->
+        <div class="preview-area">
+          <img id="inputPreview" src="" alt="入力画像" />
+          <div class="img-label">入力画像</div>
+        </div>
+
+        <!-- 右：解析結果 -->
+        <div class="result-area">
+          <table class="result-table">
+            <tr>
+              <td>セットコード</td>
+              <td id="resSetCode">—</td>
+            </tr>
+            <tr>
+              <td>コレクター番号</td>
+              <td id="resCollectorNumber">—</td>
+            </tr>
+            <tr>
+              <td>カード名</td>
+              <td id="resCardName">—</td>
+            </tr>
+            <tr>
+              <td>Scryfall 検証</td>
+              <td id="resValidated">—</td>
+            </tr>
+            <tr>
+              <td>Scryfall ページ</td>
+              <td id="resScryfallUri">—</td>
+            </tr>
+          </table>
+
+          <!-- Scryfall 正規画像 -->
+          <div id="scryfallImageWrap" class="preview-area hidden" style="width:100%;margin-top:16px;">
+            <img id="scryfallImage" src="" alt="Scryfall 画像" style="width:160px;" />
+            <div class="img-label">Scryfall 正規画像</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function analyze() {
+      const url = document.getElementById('imageUrl').value.trim();
+      if (!url) return;
+
+      // UI リセット
+      setVisible('loading', true);
+      setVisible('errorBox', false);
+      setVisible('resultLayout', false);
+      document.getElementById('analyzeBtn').disabled = true;
+
+      try {
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image_url: url }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          showError(data.detail || `エラー: ${res.status}`);
+          return;
+        }
+
+        // 入力画像プレビュー
+        document.getElementById('inputPreview').src = url;
+
+        // 結果セット
+        document.getElementById('resSetCode').textContent = data.set_code ?? '—';
+        document.getElementById('resCollectorNumber').textContent = data.collector_number ?? '—';
+        document.getElementById('resCardName').textContent = data.card_name ?? '—';
+
+        const validatedEl = document.getElementById('resValidated');
+        validatedEl.innerHTML = data.validated
+          ? '<span class="badge badge-ok">検証済み</span>'
+          : '<span class="badge badge-ng">未検証</span>';
+
+        const scryfallEl = document.getElementById('resScryfallUri');
+        if (data.scryfall_uri) {
+          scryfallEl.innerHTML = `<a class="scryfall-link" href="${data.scryfall_uri}" target="_blank" rel="noopener noreferrer">Scryfallで開く</a>`;
+        } else {
+          scryfallEl.textContent = '—';
+        }
+
+        if (data.scryfall_image_uri) {
+          document.getElementById('scryfallImage').src = data.scryfall_image_uri;
+          setVisible('scryfallImageWrap', true);
+        } else {
+          setVisible('scryfallImageWrap', false);
+        }
+
+        setVisible('resultLayout', true);
+
+      } catch (e) {
+        showError(`通信エラー: ${e.message}`);
+      } finally {
+        setVisible('loading', false);
+        document.getElementById('analyzeBtn').disabled = false;
+      }
+    }
+
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      box.textContent = msg;
+      setVisible('errorBox', true);
+    }
+
+    function setVisible(id, visible) {
+      const el = document.getElementById(id);
+      if (visible) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    }
+
+    // Enter キーで解析
+    document.getElementById('imageUrl').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') analyze();
+    });
+  </script>
+</body>
+</html>
