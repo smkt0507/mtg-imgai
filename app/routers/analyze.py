@@ -1,7 +1,11 @@
 from fastapi import APIRouter, HTTPException
 
 from app.schemas import AnalyzeRequest, AnalyzeResponse
-from app.services.vision import analyze_card_image
+from app.services.vision import (
+    AIProviderError,
+    AIQuotaExceededError,
+    analyze_card_image,
+)
 from app.services.scryfall import lookup_card, extract_image_uri
 
 router = APIRouter(prefix="/api", tags=["mtg"])
@@ -22,6 +26,10 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         ai_result = await analyze_card_image(image_url)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=f"AI解析エラー: {e}")
+    except AIQuotaExceededError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except AIProviderError as e:
+        raise HTTPException(status_code=502, detail=f"AIプロバイダーエラー: {e}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OpenAI APIエラー: {e}")
 
