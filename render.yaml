@@ -3,7 +3,7 @@ services:
     name: mtg-imgai
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: OPENAI_API_KEY
-        sync: false   # Renderのダッシュボードで手動入力
+        sync: false # Renderのダッシュボードで手動入力
